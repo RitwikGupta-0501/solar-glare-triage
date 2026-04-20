@@ -1,48 +1,68 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-__global__ void findMaxKernel(unsigned char* d_img, int* d_block_maxes, int n) {
-    // Static allocation is safer for debugging
-    __shared__ int sdata[256];
+// 1. Horizontal Pass
+__global__ void blurHorizontal(unsigned char* d_in, float* d_out, int width, int height, int radius) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x < width && y < height) {
+        float sum = 0.0f;
+        int count = 0;
 
-    // Load and cast to int immediately
-    sdata[tid] = (i < n) ? (int)d_img[i] : 0;
-    __syncthreads();
-
-    // Standard reduction loop
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            if (sdata[tid + s] > sdata[tid]) {
-                sdata[tid] = sdata[tid + s];
+        // Slide window horizontally
+        for (int dx = -radius; dx <= radius; dx++) {
+            int currentX = x + dx;
+            // Clamp to image boundaries
+            if (currentX >= 0 && currentX < width) {
+                sum += (float)d_in[y * width + currentX];
+                count++;
             }
         }
-        __syncthreads();
+        // Write out the average as a float to prevent precision loss
+        d_out[y * width + x] = sum / count;
     }
-
-    if (tid == 0) d_block_maxes[blockIdx.x] = sdata[0];
 }
 
-__global__ void findMinKernel(unsigned char* d_img, int* d_block_mins, int n) {
-    __shared__ int sdata[256];
+// 2. Vertical Pass
+__global__ void blurVertical(float* d_in, float* d_out, int width, int height, int radius) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    unsigned int tid = threadIdx.x;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x < width && y < height) {
+        float sum = 0.0f;
+        int count = 0;
 
-    // Load 255 for out-of-bounds so they don't win the "Min" contest
-    sdata[tid] = (i < n) ? (int)d_img[i] : 255;
-    __syncthreads();
-
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            if (sdata[tid + s] < sdata[tid]) {
-                sdata[tid] = sdata[tid + s];
+        // Slide window vertically
+        for (int dy = -radius; dy <= radius; dy++) {
+            int currentY = y + dy;
+            if (currentY >= 0 && currentY < height) {
+                sum += d_in[currentY * width + x];
+                count++;
             }
         }
-        __syncthreads();
+        d_out[y * width + x] = sum / count;
     }
+}
 
-    if (tid == 0) d_block_mins[blockIdx.x] = sdata[0];
+// 3. The Subtraction (High-Pass)
+__global__ void subtractIllumination(unsigned char* d_original, float* d_blurred, unsigned char* d_final, int width, int height) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x < width && y < height) {
+        int idx = y * width + x;
+
+        float orig = (float)d_original[idx];
+        float blur = d_blurred[idx];
+
+        // P_new = (Original - Blurred) + 128 (Neutral Gray Offset)
+        float result = (orig - blur) + 128.0f;
+
+        // Clamp just in case
+        if (result < 0.0f) result = 0.0f;
+        if (result > 255.0f) result = 255.0f;
+
+        d_final[idx] = (unsigned char)result;
+    }
 }
