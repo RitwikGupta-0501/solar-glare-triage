@@ -1,7 +1,7 @@
 # Makefile
 NVCC = nvcc
 # Pascal architecture (MX130)
-ARCH = -gencode arch=compute_61,code=sm_61
+ARCH = -gencode arch=compute_50,code=sm_50
 CFLAGS = -I./include
 TARGET = glare_normalizer
 

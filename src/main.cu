@@ -5,6 +5,7 @@
 #include "../include/stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../include/stb_image_write.h"
+#include "kernels.cu"
 
 // Error checking macro
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -33,16 +34,47 @@ int main(int argc, char** argv) {
     size_t img_size = width * height * sizeof(unsigned char);
     std::cout << "Loaded image: " << width << "x" << height << " (" << img_size << " bytes)" << std::endl;
 
-    // Allocate Device Memory
     unsigned char *d_img;
     gpuErrchk(cudaMalloc(&d_img, img_size));
 
-    // Copy Host to Device
     gpuErrchk(cudaMemcpy(d_img, h_img, img_size, cudaMemcpyHostToDevice));
 
-    // --- PHASE 2 & 3 WILL LIVE HERE ---
-    // For Phase 1, we just copy it back to prove the bridge works
-    // -----------------------------------
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (width * height + threadsPerBlock - 1) / threadsPerBlock;
+
+    int *d_block_maxes;
+    int *d_block_mins;
+
+    gpuErrchk(cudaMalloc(&d_block_maxes, blocksPerGrid * sizeof(int)));
+    gpuErrchk(cudaMalloc(&d_block_mins, blocksPerGrid * sizeof(int)));
+
+    cudaMemset(d_block_maxes, 0, blocksPerGrid * sizeof(int));
+    cudaMemset(d_block_mins, 255, blocksPerGrid * sizeof(int));
+
+    findMaxKernel<<<blocksPerGrid, threadsPerBlock>>>(d_img, d_block_maxes, width * height);
+    findMinKernel<<<blocksPerGrid, threadsPerBlock>>>(d_img, d_block_mins, width * height);
+
+    gpuErrchk(cudaPeekAtLastError());
+    gpuErrchk(cudaDeviceSynchronize());
+
+    int *h_block_maxes = (int*)malloc(blocksPerGrid * sizeof(int));
+    cudaMemcpy(h_block_maxes, d_block_maxes, blocksPerGrid * sizeof(int), cudaMemcpyDeviceToHost);
+    int *h_block_mins = (int*)malloc(blocksPerGrid * sizeof(int));
+    cudaMemcpy(h_block_mins, d_block_mins, blocksPerGrid * sizeof(int), cudaMemcpyDeviceToHost);
+
+    int globalMax = 0;
+    for(int i = 0; i < blocksPerGrid; i++) {
+        if(h_block_maxes[i] > globalMax) globalMax = h_block_maxes[i];
+    }
+
+    int globalMin = 255;
+    for(int i = 0; i < blocksPerGrid; i++) {
+        if(h_block_mins[i] < globalMin) globalMin = h_block_mins[i];
+    }
+
+    if (globalMax == globalMin) globalMax++;
+
+    std::cout << "Glare Peak (Max): " << globalMax << " | Darkest Point (Min): " << globalMin << std::endl;
 
     unsigned char *h_out = (unsigned char*)malloc(img_size);
     gpuErrchk(cudaMemcpy(h_out, d_img, img_size, cudaMemcpyDeviceToHost));
